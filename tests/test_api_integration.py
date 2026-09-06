@@ -273,3 +273,30 @@ def test_the_calling_window_is_judged_in_the_property_timezone(api):
     body = _post(api, "/calling_window", lead_id="led_halloway")
     assert "allowed" in body
     assert body["local_time"] or body["reason"]
+
+
+def test_a_field_nobody_answers_is_given_up_on_rather_than_asked_forever(api):
+    """Measured on a live run: the agent asked "English or Spanish?" three turns running because the
+    caller kept answering something else, and nothing would ever have stopped it."""
+    started = _post(api, "/start_call", lead_id="led_halloway")
+    session = started["session_id"]
+    first = started["next_question"]["field_id"]
+    assert first
+
+    # Ask without ever answering. The same field comes back until the cap, then the call moves on.
+    served = [first]
+    for _ in range(5):
+        served.append(_post(api, "/next_question", session_id=session)["field_id"])
+    assert served[0] == served[1] == served[2], served
+    assert served[3] != first, f"still asking {first} after the cap: {served}"
+
+    # Given up on as unknown with the reason kept, not left blank.
+    result = _post(api, "/intake_result", session_id=session)
+    given_up = [
+        one
+        for one in result["answers"]
+        if one["field_id"] == first and one["status"] == "unknown"
+    ]
+    assert given_up, result["answers"]
+    # The reason is kept, so a licensed agent knows it was asked and not obtained rather than skipped.
+    assert "not obtained" in given_up[0]["verbatim"]

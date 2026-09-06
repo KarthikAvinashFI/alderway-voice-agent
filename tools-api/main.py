@@ -18,8 +18,10 @@ from typing import Any
 import psycopg
 from fastapi import FastAPI, HTTPException
 from form_engine import Answer, IntakeEngine, engine_from_records
+from form_spec import AnswerStatus, Confidence
 from form_intake import INTAKE
 from psycopg.rows import dict_row
+from psycopg.types.json import Json
 from pydantic import BaseModel, Field
 from rules_engine import evaluate
 
@@ -423,13 +425,12 @@ def start_call(body: StartCallIn) -> dict:
     )
     audit("call_attempt", call_id, "started", {"lead_id": body.lead_id, "attempt": attempt, "resumed": resumed})
 
-    form = load_engine(session_id)
     return {
         "call_id": call_id,
         "session_id": session_id,
         "resumed": resumed,
         "attempt_number": attempt,
-        "next_question": question_payload(form),
+        "next_question": serve_question(session_id),
     }
 
 
@@ -457,10 +458,56 @@ def end_call(body: EndCallIn) -> dict:
 # ---------------------------------------------------------------- the form
 
 
+# Three asks, then it is recorded as not obtained and the call moves on. A caller who keeps talking
+# about something else would otherwise be asked the same question for the rest of the call: measured,
+# the language question was asked three turns running and would not have stopped.
+MAX_ASKS_PER_FIELD = 3
+
+
+def record_unknown(session_id: str, field_id: str, why: str) -> None:
+    """Give up on one field, as unknown rather than blank, so the reason survives the call."""
+    persist(
+        session_id,
+        Answer(
+            field_id=field_id,
+            value=None,
+            status=AnswerStatus.UNKNOWN,
+            verbatim=why,
+            confidence=Confidence.LOW,
+            sequence=0,
+        ),
+    )
+    audit("session", session_id, "field_given_up", {"field_id": field_id, "why": why})
+
+
+def serve_question(session_id: str) -> dict:
+    """The next question, with a field nobody will answer given up on rather than repeated."""
+    form = load_engine(session_id)
+    attempts = (one(
+        "SELECT ask_attempts FROM intake_sessions WHERE session_id = %s", (session_id,)
+    ) or {}).get("ask_attempts") or {}
+    while True:
+        item = form.next_item()
+        if item is None:
+            break
+        field_id = item.field.id
+        seen = int(attempts.get(field_id, 0)) + 1
+        attempts[field_id] = seen
+        if seen <= MAX_ASKS_PER_FIELD:
+            break
+        record_unknown(session_id, field_id, f"not obtained after {MAX_ASKS_PER_FIELD} asks")
+        form = load_engine(session_id)
+    run(
+        "UPDATE intake_sessions SET ask_attempts = %s, updated_at = now() WHERE session_id = %s",
+        (Json(attempts), session_id),
+    )
+    return question_payload(form)
+
+
 @app.post("/next_question")
 def next_question(body: SessionIn) -> dict:
     _session_or_404(body.session_id)
-    return question_payload(load_engine(body.session_id))
+    return serve_question(body.session_id)
 
 
 def _session_or_404(session_id: str) -> dict:
@@ -510,7 +557,7 @@ def record_answers(body: RecordAnswersIn) -> dict:
                 payload["previous_value"] = before_value
         results.append(payload)
     save_state(body.session_id, form)
-    return {"results": results, "next_question": question_payload(form)}
+    return {"results": results, "next_question": serve_question(body.session_id)}
 
 
 @app.post("/refuse_answer")
@@ -527,7 +574,7 @@ def refuse_answer(body: FieldIn) -> dict:
         "field_id": body.field_id,
         "status": "refused",
         "fatal": result.fatal,
-        "next_question": question_payload(form),
+        "next_question": serve_question(body.session_id),
     }
 
 
@@ -543,7 +590,7 @@ def answer_unknown(body: FieldIn) -> dict:
     return {
         "field_id": body.field_id,
         "status": "unknown",
-        "next_question": question_payload(form),
+        "next_question": serve_question(body.session_id),
     }
 
 

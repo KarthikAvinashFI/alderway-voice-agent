@@ -74,7 +74,10 @@ CREATE TABLE intake_sessions (
                           CHECK (state IN ('in_progress','complete','ended_fatal_refusal','ended_by_caller')),
     created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
-    completed_at          TIMESTAMPTZ
+    completed_at          TIMESTAMPTZ,
+    -- How many times each field has been served as the next question. Without it a caller who keeps
+    -- answering something else is asked the same thing for the rest of the call.
+    ask_attempts          JSONB NOT NULL DEFAULT '{}'::jsonb
 );
 
 CREATE TABLE call_attempts (
