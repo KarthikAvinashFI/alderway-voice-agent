@@ -64,33 +64,56 @@ def run(sql: str, params: tuple = ()) -> None:
 
 log = logging.getLogger("uvicorn.error")
 
-# Every table this service writes to. Checked once at startup, because a rebuilt world that is missing
-# one fails at the first call that touches it, and the traceback names the table but nothing says the
-# world was built short.
-DECLARED_TABLES = (
-    "lender_partners", "campaigns", "leads", "do_not_call", "intake_sessions", "call_attempts",
-    "answers", "answer_revisions", "consent_events", "eligibility_decisions", "transfers",
-    "callback_requests", "audit_log",
-)
+# Declared shape of the world this service writes to, taken from db/schema.sql.
+DECLARED_SCHEMA: dict[str, tuple[str, ...]] = {
+    "lender_partners": ("partner_id", "name", "contact_phone", "referral_label"),
+    "campaigns": ("campaign_id", "name", "questionnaire", "questionnaire_version", "reference_year", "active", "max_attempts", "created_at"),
+    "leads": ("lead_id", "campaign_id", "partner_id", "full_name", "phone", "property_address_hint", "property_state", "partner_reference", "time_zone", "status", "attempts", "created_at"),
+    "do_not_call": ("dnc_id", "phone", "reason", "source", "verbatim", "recorded_at"),
+    "intake_sessions": ("session_id", "lead_id", "questionnaire", "questionnaire_version", "state", "created_at", "updated_at", "completed_at", "ask_attempts"),
+    "call_attempts": ("call_id", "lead_id", "session_id", "room_name", "attempt_number", "status", "disposition", "ended_reason", "duration_seconds", "recording_url", "started_at", "ended_at"),
+    "answers": ("answer_id", "session_id", "field_id", "value_text", "value_type", "status", "verbatim", "confidence", "sequence", "updated_at"),
+    "answer_revisions": ("revision_id", "answer_id", "value_text", "value_type", "status", "verbatim", "confidence", "sequence", "recorded_at"),
+    "consent_events": ("consent_id", "lead_id", "call_id", "kind", "granted", "verbatim", "recorded_at"),
+    "eligibility_decisions": ("decision_id", "session_id", "decision", "hard_codes", "soft_codes", "indeterminate_codes", "notes", "spoken_reason", "rules_reference_year", "decided_at"),
+    "transfers": ("transfer_id", "call_id", "to_number", "reason", "answers_collected", "succeeded", "requested_at"),
+    "callback_requests": ("callback_id", "lead_id", "call_id", "window_label", "notes", "requested_at"),
+    "audit_log": ("audit_id", "entity", "entity_id", "action", "detail", "recorded_at"),
+}
 
 
 @app.on_event("startup")
-def report_missing_tables() -> None:
+def report_missing_schema() -> None:
+    """Name what the world was built without, instead of crashing at the first call that needs it."""
     try:
-        present = {
-            row["table_name"]
-            for row in many(
-                "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"
-            )
-        }
+        rows = many(
+            "SELECT table_name, column_name FROM information_schema.columns"
+            " WHERE table_schema = 'public'"
+        )
     except Exception:
         log.exception("could not read the schema at startup")
         return
-    missing = [name for name in DECLARED_TABLES if name not in present]
-    if missing:
-        log.error("world is missing %d declared table(s): %s", len(missing), ", ".join(missing))
-    else:
-        log.info("all %d declared tables present", len(DECLARED_TABLES))
+    present: dict[str, set] = {}
+    for row in rows:
+        present.setdefault(row["table_name"], set()).add(row["column_name"])
+    missing_tables = [name for name in DECLARED_SCHEMA if name not in present]
+    missing_columns = [
+        f"{name}.{col}"
+        for name, cols in DECLARED_SCHEMA.items()
+        if name in present
+        for col in cols
+        if col not in present[name]
+    ]
+    if missing_tables:
+        log.error("world is missing table(s): %s", ", ".join(missing_tables))
+    if missing_columns:
+        log.error("world is missing column(s): %s", ", ".join(missing_columns))
+    if not missing_tables and not missing_columns:
+        log.info(
+            "world matches the declared schema: %d tables, %d columns",
+            len(DECLARED_SCHEMA),
+            sum(len(c) for c in DECLARED_SCHEMA.values()),
+        )
 
 
 def new_id(prefix: str) -> str:
