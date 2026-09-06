@@ -443,7 +443,7 @@ class IntakeAgent(Agent):
 
     @function_tool()
     async def honour_removal_request(self, said: str = "") -> dict:
-        """The caller asked not to be contacted again. Call this immediately, before saying anything else, and never try to talk them out of it."""
+        """The caller asked not to be contacted again. Call this immediately, before saying anything else, and never try to talk them out of it. This also ends the call, so do not call end_call after it."""
         try:
             await self._suppress(said, source="caller_request", reason="caller asked to be removed")
             await self._end_call()
