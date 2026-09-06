@@ -275,6 +275,10 @@ def question_payload(form: IntakeEngine) -> dict:
         )
     return {
         "done": False,
+        # Everything a quote needs is in. A real intake stops here and hands over rather than keeping
+        # somebody on the phone for the optional remainder: 17 of the 92 fields are required, and a
+        # measured call spent 51 turns on the plan in order and timed out before it ever transferred.
+        "quotable": not form.missing_required(),
         "field_id": field.id,
         "upcoming": upcoming,
         "section": field.section,

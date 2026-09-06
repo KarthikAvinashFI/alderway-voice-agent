@@ -300,3 +300,14 @@ def test_a_field_nobody_answers_is_given_up_on_rather_than_asked_forever(api):
     assert given_up, result["answers"]
     # The reason is kept, so a licensed agent knows it was asked and not obtained rather than skipped.
     assert "not obtained" in given_up[0]["verbatim"]
+
+
+def test_the_intake_reports_when_a_quote_is_already_possible(api):
+    """17 of the 92 fields are required for a quote. A measured call spent 51 turns walking the plan in
+    order and timed out before it ever reached eligibility or a transfer."""
+    started = _post(api, "/start_call", lead_id="led_achterberg", resume=False)
+    session = started["session_id"]
+    assert started["next_question"]["quotable"] is False
+
+    result = _post(api, "/intake_result", session_id=session)
+    assert result["summary"]["missing_required"], "a fresh intake cannot be quotable"
