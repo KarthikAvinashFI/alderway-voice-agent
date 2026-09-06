@@ -48,7 +48,8 @@ uv run agent/agent.py console       # talk to it through your microphone
 ```
 
 `console` needs no telephony and no seeded call: it works the seeded lead named by `DEMO_LEAD_PHONE`.
-Set `IGNORE_CALLING_WINDOW=1` if you are trying it outside calling hours.
+Set `IGNORE_CALLING_WINDOW=1` to dial outside calling hours. It applies to the pre-dial check;
+a call that is already connected is always answered, whatever the hour.
 
 Three ways to run, all the same code path:
 

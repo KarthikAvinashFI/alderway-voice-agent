@@ -112,13 +112,13 @@ async def entrypoint(ctx: JobContext) -> None:
     )
     lead = await resolve_lead(client, phone)
 
+    # Whether to place a call is decided before dialling, in `outbound.py`. By the time this runs
+    # somebody is already connected, so an out-of-window call is recorded and answered rather than
+    # hung up on: refusing to speak to a person on the line is worse than speaking to them, and
+    # raising here crashed the job instead.
     window = await client.call("calling_window", lead_id=lead["lead_id"])
-    if not window.get("allowed") and os.environ.get("IGNORE_CALLING_WINDOW", "").lower() not in {
-        "1",
-        "true",
-        "yes",
-    }:
-        raise RuntimeError(f"outside the calling window: {window.get('reason')}")
+    if not window.get("allowed"):
+        logger.warning("outside the calling window: %s", window.get("reason"))
 
     started = await client.call("start_call", lead_id=lead["lead_id"], room_name=ctx.room.name or "")
     # Setup is not part of the conversation. Trace from the first conversational action onward.
