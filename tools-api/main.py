@@ -15,6 +15,7 @@ import uuid
 from datetime import date, datetime
 from typing import Any
 
+import logging
 import psycopg
 from fastapi import FastAPI, HTTPException
 from form_engine import Answer, IntakeEngine, engine_from_records
@@ -61,16 +62,57 @@ def run(sql: str, params: tuple = ()) -> None:
         c.commit()
 
 
+log = logging.getLogger("uvicorn.error")
+
+# Every table this service writes to. Checked once at startup, because a rebuilt world that is missing
+# one fails at the first call that touches it, and the traceback names the table but nothing says the
+# world was built short.
+DECLARED_TABLES = (
+    "lender_partners", "campaigns", "leads", "do_not_call", "intake_sessions", "call_attempts",
+    "answers", "answer_revisions", "consent_events", "eligibility_decisions", "transfers",
+    "callback_requests", "audit_log",
+)
+
+
+@app.on_event("startup")
+def report_missing_tables() -> None:
+    try:
+        present = {
+            row["table_name"]
+            for row in many(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"
+            )
+        }
+    except Exception:
+        log.exception("could not read the schema at startup")
+        return
+    missing = [name for name in DECLARED_TABLES if name not in present]
+    if missing:
+        log.error("world is missing %d declared table(s): %s", len(missing), ", ".join(missing))
+    else:
+        log.info("all %d declared tables present", len(DECLARED_TABLES))
+
+
 def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
 
 def audit(entity: str, entity_id: str, action: str, detail: dict | None = None) -> None:
-    run(
-        "INSERT INTO audit_log (audit_id, entity, entity_id, action, detail)"
-        " VALUES (%s, %s, %s, %s, %s::jsonb)",
-        (new_id("aud"), entity, entity_id, action, json.dumps(detail or {})),
-    )
+    """Record what happened. Never the reason a call fails.
+
+    The audit trail is a record OF the call, not a precondition FOR it, so a write that cannot land is
+    logged loudly and the call continues. Dropping somebody's call because a log row failed is the
+    worse of the two outcomes, and one rebuilt world was missing this table entirely, which killed
+    every call at `start_call`.
+    """
+    try:
+        run(
+            "INSERT INTO audit_log (audit_id, entity, entity_id, action, detail)"
+            " VALUES (%s, %s, %s, %s, %s::jsonb)",
+            (new_id("aud"), entity, entity_id, action, json.dumps(detail or {})),
+        )
+    except Exception:
+        log.exception("audit row not written: %s %s %s", entity, entity_id, action)
 
 
 def _d(value) -> str | None:
