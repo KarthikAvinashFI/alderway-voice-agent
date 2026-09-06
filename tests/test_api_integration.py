@@ -300,3 +300,23 @@ def test_a_field_nobody_answers_is_given_up_on_rather_than_asked_forever(api):
     assert given_up, result["answers"]
     # The reason is kept, so a licensed agent knows it was asked and not obtained rather than skipped.
     assert "not obtained" in given_up[0]["verbatim"]
+
+
+def test_a_call_starts_even_when_the_world_lacks_a_declared_column(api):
+    """A rebuilt world arrived without call_attempts.room_name and every call errored as "target agent
+    never joined the room". Losing a diagnostic field must not cost the call."""
+    from main import _insertable, PRESENT_COLUMNS
+
+    PRESENT_COLUMNS["call_attempts"] = {"call_id", "lead_id", "status"}
+    kept = _insertable(
+        "call_attempts",
+        {"call_id": "c1", "lead_id": "l1", "room_name": "r1", "status": "in_progress"},
+    )
+    assert set(kept) == {"call_id", "lead_id", "status"}
+
+    # Nothing known about the table means write everything and let the database decide.
+    PRESENT_COLUMNS.pop("call_attempts")
+    assert set(_insertable("call_attempts", {"call_id": "c1", "room_name": "r1"})) == {
+        "call_id",
+        "room_name",
+    }

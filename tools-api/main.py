@@ -65,6 +65,22 @@ def run(sql: str, params: tuple = ()) -> None:
 log = logging.getLogger("uvicorn.error")
 
 # Declared shape of the world this service writes to, taken from db/schema.sql.
+# What the world actually turned out to have, filled in at startup. A rebuilt world sometimes arrives
+# without a declared column, and losing a diagnostic field must not cost the call.
+PRESENT_COLUMNS: dict[str, set] = {}
+
+
+def _insertable(table: str, values: dict) -> dict:
+    """The subset of `values` this world can actually store."""
+    have = PRESENT_COLUMNS.get(table)
+    if not have:
+        return values
+    dropped = [name for name in values if name not in have]
+    if dropped:
+        log.error("%s is missing %s; continuing without it", table, ", ".join(dropped))
+    return {name: value for name, value in values.items() if name in have}
+
+
 DECLARED_SCHEMA: dict[str, tuple[str, ...]] = {
     "lender_partners": ("partner_id", "name", "contact_phone", "referral_label"),
     "campaigns": ("campaign_id", "name", "questionnaire", "questionnaire_version", "reference_year", "active", "max_attempts", "created_at"),
@@ -108,6 +124,8 @@ def report_missing_schema() -> None:
         log.error("world is missing table(s): %s", ", ".join(missing_tables))
     if missing_columns:
         log.error("world is missing column(s): %s", ", ".join(missing_columns))
+    PRESENT_COLUMNS.clear()
+    PRESENT_COLUMNS.update(present)
     if not missing_tables and not missing_columns:
         log.info(
             "world matches the declared schema: %d tables, %d columns",
@@ -483,10 +501,21 @@ def start_call(body: StartCallIn) -> dict:
     attempt = int(lead["attempts"]) + 1
     call_id = new_id("cal")
     run("UPDATE leads SET attempts = %s WHERE lead_id = %s", (attempt, body.lead_id))
+    row = _insertable(
+        "call_attempts",
+        {
+            "call_id": call_id,
+            "lead_id": body.lead_id,
+            "session_id": session_id,
+            "room_name": body.room_name,
+            "attempt_number": attempt,
+            "status": "in_progress",
+        },
+    )
     run(
-        "INSERT INTO call_attempts (call_id, lead_id, session_id, room_name, attempt_number, status)"
-        " VALUES (%s,%s,%s,%s,%s,'in_progress')",
-        (call_id, body.lead_id, session_id, body.room_name, attempt),
+        f"INSERT INTO call_attempts ({', '.join(row)})"  # noqa: S608 - names come from the schema
+        f" VALUES ({', '.join(['%s'] * len(row))})",
+        tuple(row.values()),
     )
     audit("call_attempt", call_id, "started", {"lead_id": body.lead_id, "attempt": attempt, "resumed": resumed})
 
