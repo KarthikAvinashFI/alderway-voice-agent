@@ -30,13 +30,34 @@ logger = logging.getLogger("alderway-voice-agent")
 MAX_SILENCE_PROMPTS = 2
 
 
+class NotOursToCall(Exception):
+    """Reached somebody we have no business collecting from. Ends the call, never crashes the job.
+
+    Both cases used to raise into the job runner, which killed the call rather than closing it. A
+    caller is already on the line by then, so the only correct behaviour is to say one line and hang
+    up.
+    """
+
+    def __init__(self, spoken: str, why: str) -> None:
+        super().__init__(why)
+        self.spoken = spoken
+        self.why = why
+
+
 async def resolve_lead(client: ToolsClient, phone: str) -> dict:
     """Who we are calling, from our own records. What the lender sent is never treated as verified."""
     lead = await client.call("lookup_lead_by_phone", phone=phone)
     if not lead.get("lead_id"):
-        raise RuntimeError(f"no lead on file for {phone}")
+        raise NotOursToCall(
+            "Sorry, I think I have the wrong number. I will not call again. Goodbye.",
+            f"no lead on file for {phone}",
+        )
     if lead.get("suppressed"):
-        raise RuntimeError(f"lead {lead['lead_id']} is on the do not call list")
+        raise NotOursToCall(
+            "Sorry to have troubled you. Your number is on our do not call list and I am ending "
+            "the call now. Goodbye.",
+            f"lead {lead['lead_id']} is on the do not call list",
+        )
     return lead
 
 
@@ -110,7 +131,15 @@ async def entrypoint(ctx: JobContext) -> None:
         session_id=session_key,
         timeout=float(os.environ.get("TOOLS_TIMEOUT_SECONDS", "5")),
     )
-    lead = await resolve_lead(client, phone)
+    try:
+        lead = await resolve_lead(client, phone)
+    except NotOursToCall as stop:
+        # Closed, not crashed. Speaking the line would need the whole pipeline built first, and this
+        # path exists to end the call rather than to hold one.
+        # Nothing has been started yet, so there is nothing to close but the job itself. Returning
+        # ends the call; raising killed it, which is the whole difference.
+        logger.warning("ending the call without an intake: %s", stop.why)
+        return
 
     # Whether to place a call is decided before dialling, in `outbound.py`. By the time this runs
     # somebody is already connected, so an out-of-window call is recorded and answered rather than
